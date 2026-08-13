@@ -70,6 +70,14 @@ export function renderCardText(command: string, exitCode: number, output: string
   )
 }
 
+/** The /bq line that cancels a running card: the card args ARE the exact
+ * command text the running registry is keyed by (name is /b or /bb, args is
+ * the shell command). Lives on the node side so it stays unit-testable. */
+export function cancelLine(node: { name: string | null; args: string | null }): string {
+  const args = (node.args || '').trim()
+  return args ? '/bq ' + args : '/bq'
+}
+
 /** The injected message text: explicit provenance plus the exit code so the model knows whether the command succeeded. */
 export function noteText(command: string, output: string, exitCode: number): string {
   return (

@@ -7,7 +7,8 @@
 - Forward the command invocation signal into the shell execution so long-running commands (e.g. `/b sleep 100`) are cancellable instead of holding the session; already-aborted signals reject before execution.
 - Add `/bq` cancel command: the official Web UI never aborts the command signal (ui-commands executes without one; gateway falls back to NEVER_ABORTED_SIGNAL), so bang now owns an AbortController registry — `/bq <cmd>` aborts by exact text, bare `/bq` aborts the most recent run.
 - Include the exit code in the injected context message (`> /b <cmd> [exit N]`) so the model knows whether the command succeeded.
-- `/b` now executes in the background: the handler returns immediately so the composer claim releases and the user can type `/bq` (or keep chatting) while the shell runs; the result is injected into context when it settles. `/bb` stays synchronous because its result can only render on the card.
+- `/b` now executes in the background
+- `/bb` (synchronous, card-only result) gets an in-card `⏹ cancel` button: it dispatches `/bq` through `ctx.remote.commands.execute` — independent of the composer, so cancellation works even while the input claim is held.: the handler returns immediately so the composer claim releases and the user can type `/bq` (or keep chatting) while the shell runs; the result is injected into context when it settles. `/bb` stays synchronous because its result can only render on the card.
 
 ### Added
 

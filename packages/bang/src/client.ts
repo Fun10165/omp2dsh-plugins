@@ -15,6 +15,7 @@
  */
 
 import { createElement, useState, type CSSProperties, type ReactNode } from 'react'
+import { cancelLine } from './index.js'
 import type { ClientContext, CommandNode } from '@deepseek-ai/dsh-client-runtime/client'
 import type { CommandRowOwnerProps, CommandRowProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 // Type-only: pulls the `conversation.chat.commandview` SlotMap declaration.
@@ -55,6 +56,16 @@ const chevStyle: CSSProperties = { opacity: 0.6, fontSize: 10, width: 12, textAl
 const titleStyle: CSSProperties = { fontFamily: 'var(--ds-font-family-code)', fontWeight: 600 }
 const exclStyle: CSSProperties = { color: 'var(--dsw-alias-state-warn-primary)', fontSize: 11 }
 const stateStyle: CSSProperties = { marginLeft: 'auto', opacity: 0.75, fontSize: 11 }
+const cancelStyle: CSSProperties = {
+  border: '1px solid var(--dsw-alias-border-l2)',
+  background: 'var(--dsw-alias-bg-layer-2)',
+  color: 'var(--dsw-alias-state-error-primary)',
+  borderRadius: 6,
+  padding: '1px 8px',
+  cursor: 'pointer',
+  fontSize: 11,
+  fontFamily: 'var(--dsw-font-family)',
+}
 const bodyStyle: CSSProperties = {
   whiteSpace: 'pre-wrap',
   wordBreak: 'break-word',
@@ -68,10 +79,11 @@ const bodyStyle: CSSProperties = {
 const errorStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)' }
 
 /** Build the expanded-by-default card markup. Pure React rendering. */
-function BangCardView({ node, open, onToggle }: {
+function BangCardView({ node, open, onToggle, onCancel }: {
   node: CommandNode
   open: boolean
   onToggle: () => void
+  onCancel?: () => void
 }): ReactNode {
   const name = node.name || ''
   const args = (node.args || '').trim()
@@ -91,6 +103,15 @@ function BangCardView({ node, open, onToggle }: {
       createElement('span', { style: chevStyle }, open ? '▾' : '▸'),
       createElement('span', { style: titleStyle }, '/' + name + (args ? ' ' + args : '')),
       isExcluded ? createElement('span', { style: exclStyle }, 'excluded from context') : null,
+      // Cancel affordance while running: the composer claim may be held by a
+      // synchronous /bb, so cancellation must NOT depend on the input box.
+      running && onCancel !== undefined
+        ? createElement(
+            'button',
+            { style: cancelStyle, onClick: (event: { stopPropagation(): void }) => { event.stopPropagation(); onCancel() } },
+            '⏹ cancel',
+          )
+        : null,
       createElement('span', { style: stateStyle }, stateLabel),
     ),
     open && !running
@@ -100,9 +121,16 @@ function BangCardView({ node, open, onToggle }: {
 }
 
 /** Keyed commandview registrant: expanded by default, one per command name. */
-function BangCard({ node }: CommandRowProps): ReactNode {
+function BangCard({ node, sessionId, onCancel }: CommandRowProps & { onCancel?: (line: string) => void }): ReactNode {
   const [open, setOpen] = useState(true)
-  return createElement(BangCardView, { node, open, onToggle: () => setOpen((value) => !value) })
+  return createElement(BangCardView, {
+    node,
+    open,
+    onToggle: () => setOpen((value) => !value),
+    onCancel: onCancel !== undefined && node.outcome === null
+      ? () => onCancel(cancelLine(node))
+      : undefined,
+  })
 }
 
 /**
@@ -113,10 +141,20 @@ function BangCard({ node }: CommandRowProps): ReactNode {
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
+  // Cancel goes through the official command pipeline as /bq, dispatched via
+  // ctx.remote — completely independent of the composer, so it works even
+  // while a synchronous /bb holds the input claim.
+  const remote = (ctx as { remote?: { commands?: { execute(sessionId: string, line: string): Promise<unknown> } } }).remote
+  const onCancel = (sessionId: string, line: string): void => {
+    if (remote?.commands === undefined) return
+    void remote.commands.execute(sessionId, line).catch(() => {})
+  }
+  const Card = (props: CommandRowProps): ReactNode =>
+    createElement(BangCard, { ...props, onCancel: (line) => onCancel(props.sessionId, line) })
   for (const key of ['b', 'bb']) {
     ctx.slots.inject('conversation.chat.commandview', () => ctx.slots.register(
       { name: 'conversation.chat.commandview', key },
-      BangCard,
+      Card,
     ))
   }
 }

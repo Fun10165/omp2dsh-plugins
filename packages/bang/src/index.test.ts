@@ -16,6 +16,7 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { cancelLine } from './index.js'
 import {
   renderCardText,
   executeBangCommand,
@@ -242,5 +243,13 @@ describe('bang /b background execution (composer claim must release immediately)
     const message = agent.appended[0] as { content: Array<{ type: string; text: string }> }
     assert.match(message.content[0]!.text, /\[exit 7\]/)
     assert.match(message.content[0]!.text, /boom/)
+  })
+})
+
+describe('bang v8 card cancel button line (/bq via ctx.remote, input-independent)', () => {
+  it('builds the /bq line from the card args (exact command text)', () => {
+    assert.equal(cancelLine({ name: 'bb', args: 'sleep 30' }), '/bq sleep 30')
+    assert.equal(cancelLine({ name: 'b', args: 'lsof -i :3080' }), '/bq lsof -i :3080')
+    assert.equal(cancelLine({ name: 'bb', args: null }), '/bq')
   })
 })
