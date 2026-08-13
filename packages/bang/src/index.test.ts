@@ -87,34 +87,62 @@ describe('bang v5 /b vs /bb context split (session.append without wake)', () => 
   })
 
   it('noteToSession returns false without a session (no silent crash)', () => {
-    assert.equal(noteToSession({} as AgentLike, 'ls', 'x'), false)
+    assert.equal(noteToSession({} as AgentLike, 'ls', 'x', 1), false)
   })
 })
 
-describe('bang v6 injected-note provenance marker', () => {
+describe('bang v6/v7c injected-note provenance + exit code', () => {
   it('noteText carries an explicit provenance marker (fails on v5: no marker existed)', () => {
-    const text = noteText('ls', 'out:ls')
+    const text = noteText('ls', 'out:ls', 0)
     assert.match(text, /> \/b ls/)
     assert.match(text, /非用户直接输入/)
     assert.match(text, /自动注入/)
   })
+
+  it('noteText includes the exit code (fails pre-v7c: exit code was absent from injected context)', () => {
+    const text = noteText('lsof :i', 'error text', 1)
+    assert.match(text, /\[exit 1\]/)
+    const ok = noteText('ls', 'out', 0)
+    assert.match(ok, /\[exit 0\]/)
+  })
 })
 
 describe('bang v7b signal forwarding (long commands must be cancellable)', () => {
-  it('forwards the invocation signal into the shell spec (fails pre-fix: spec had no signal)', async () => {
-    let seenSignal: unknown = undefined
+  it('bridges the invocation signal onto the self-owned controller in the shell spec (fails pre-fix: no controller existed)', async () => {
+    let seenSignal: AbortSignal | undefined
     const shell: ShellLike = {
       resolve(request: Record<string, unknown>) {
-        seenSignal = request.signal
+        seenSignal = request.signal as AbortSignal
         return { command: String(request.command), timeoutMs: 60000 }
       },
       async run() {
         return { exitCode: 0, stdout: { text: 'ok' }, stderr: { text: '' } }
       },
     }
-    const signal = { aborted: false }
-    await executeBangCommand({ shell, sandboxPolicy: makePolicy() }, makeAgent(), 'sleep 100', false, signal as AbortSignal)
-    assert.equal(seenSignal, signal)
+    const invocation = new AbortController()
+    const probe = new AbortController()
+    let releaseRun: () => void = () => {}
+    const runGate = new Promise<void>((resolve) => { releaseRun = resolve })
+    const shellWithGate: ShellLike = {
+      resolve(request: Record<string, unknown>) {
+        seenSignal = request.signal as AbortSignal
+        return { command: String(request.command), timeoutMs: 60000 }
+      },
+      async run() {
+        await runGate
+        return { exitCode: 0, stdout: { text: 'ok' }, stderr: { text: '' } }
+      },
+    }
+    // Start the run first: shell.resolve sets seenSignal synchronously before
+    // the first await, so the listener can attach while the run is in flight.
+    const pending = executeBangCommand({ shell: shellWithGate, sandboxPolicy: makePolicy() }, makeAgent(), 'sleep 100', false, invocation.signal)
+    assert.ok(seenSignal !== undefined)
+    seenSignal!.addEventListener('abort', () => probe.abort(), { once: true })
+    // Abort WHILE the run is in flight: the bridge must reach the spec signal.
+    invocation.abort()
+    assert.equal(probe.signal.aborted, true)
+    releaseRun()
+    await pending
   })
 
   it('rejects immediately when the signal is already aborted (session must not hang)', async () => {
@@ -133,5 +161,42 @@ describe('bang v7b signal forwarding (long commands must be cancellable)', () =>
     assert.equal(ran, false)
     assert.equal(result.kind, 'error')
     assert.match(result.text, /cancelled before execution/)
+  })
+})
+
+describe('bang /bq cancellation (self-owned, UI never forwards a signal)', () => {
+  it('exposes a cancellable controller in the running registry (fails pre-fix: no registry existed)', async () => {
+    const running = new Map<string, import('./index.js').RunningBang>()
+    const shell: ShellLike = {
+      resolve(request: Record<string, unknown>) {
+        return { command: String(request.command), timeoutMs: 60000, signal: request.signal as AbortSignal }
+      },
+      async run(spec) {
+        assert.equal(running.has('sleep 100'), true)
+        return { exitCode: 0, stdout: { text: 'ok' }, stderr: { text: '' } }
+      },
+    }
+    await executeBangCommand({ shell, sandboxPolicy: makePolicy() }, makeAgent(), 'sleep 100', false, undefined, running)
+    assert.equal(running.size, 0) // cleaned up after settle
+  })
+
+  it('aborting the registry controller stops the shell run', async () => {
+    const running = new Map<string, import('./index.js').RunningBang>()
+    let receivedSignal: AbortSignal | undefined
+    const shell: ShellLike = {
+      resolve(request: Record<string, unknown>) {
+        receivedSignal = request.signal as AbortSignal
+        return { command: String(request.command), timeoutMs: 60000, signal: receivedSignal }
+      },
+      async run() {
+        return { exitCode: 0, stdout: { text: 'ok' }, stderr: { text: '' } }
+      },
+    }
+    const pending = executeBangCommand({ shell, sandboxPolicy: makePolicy() }, makeAgent(), 'sleep 100', false, undefined, running)
+    const entry = running.get('sleep 100')
+    assert.ok(entry !== undefined)
+    entry.controller.abort()
+    assert.equal(receivedSignal?.aborted, true) // the spec carried the abortable signal
+    await pending
   })
 })

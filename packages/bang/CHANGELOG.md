@@ -5,6 +5,8 @@
 ### Fixed
 
 - Forward the command invocation signal into the shell execution so long-running commands (e.g. `/b sleep 100`) are cancellable instead of holding the session; already-aborted signals reject before execution.
+- Add `/bq` cancel command: the official Web UI never aborts the command signal (ui-commands executes without one; gateway falls back to NEVER_ABORTED_SIGNAL), so bang now owns an AbortController registry — `/bq <cmd>` aborts by exact text, bare `/bq` aborts the most recent run.
+- Include the exit code in the injected context message (`> /b <cmd> [exit N]`) so the model knows whether the command succeeded.
 
 ### Added
 

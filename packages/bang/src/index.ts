@@ -70,17 +70,17 @@ export function renderCardText(command: string, exitCode: number, output: string
   )
 }
 
-/** The injected message text: explicit provenance so the model never mistakes it for user-typed input. */
-export function noteText(command: string, output: string): string {
+/** The injected message text: explicit provenance plus the exit code so the model knows whether the command succeeded. */
+export function noteText(command: string, output: string, exitCode: number): string {
   return (
-    '> /b ' + command +
+    '> /b ' + command + ' [exit ' + exitCode + ']' +
     '：用户执行指令的输出（由 bang 插件自动注入，非用户直接输入；仅作上下文参考，除非用户要求否则无需回应）' +
     '\n\n```\n' + output + '\n```'
   )
 }
 
 /** Append the result to the session flow (in-context, no wake). */
-export function noteToSession(agent: AgentLike, command: string, output: string): boolean {
+export function noteToSession(agent: AgentLike, command: string, output: string, exitCode: number): boolean {
   if (agent.session === undefined || typeof agent.session.append !== 'function') return false
   try {
     agent.session.append(
@@ -88,7 +88,7 @@ export function noteToSession(agent: AgentLike, command: string, output: string)
       {
         id: 'bang-' + Date.now() + '-' + Math.floor(Math.random() * 1e9),
         role: 'user',
-        content: [{ type: 'text', text: noteText(command, output) }],
+        content: [{ type: 'text', text: noteText(command, output, exitCode) }],
         source: { kind: 'plugin', plugin: 'bang' },
       },
       { surfaceOp: 'append' },
@@ -99,12 +99,21 @@ export function noteToSession(agent: AgentLike, command: string, output: string)
   }
 }
 
+/** One running bang execution keyed by its command text. */
+export interface RunningBang {
+  /** Abort controller owned by this plugin — the ONLY reliable cancel path today
+   * (the official UI never forwards a signal: ui-commands executes without one
+   * and the gateway falls back to NEVER_ABORTED_SIGNAL). */
+  controller: AbortController
+  startedAt: number
+}
+
 /** Execute one command and build its card result; `include` decides whether the result also enters the session flow. */
 export async function executeBangCommand(deps: {
   shell: ShellLike
   sandboxPolicy: SandboxPolicyLike
   timeoutMs?: number
-}, agent: AgentLike, command: string, include: boolean, signal?: AbortSignal): Promise<BangCardResult> {
+}, agent: AgentLike, command: string, include: boolean, signal?: AbortSignal, running?: Map<string, RunningBang>): Promise<BangCardResult> {
   const { shell, sandboxPolicy, timeoutMs = 60_000 } = deps
   const trimmed = String(command ?? '').trim()
   if (!trimmed) {
@@ -115,23 +124,36 @@ export async function executeBangCommand(deps: {
   }
   const cwd = agent.session?.header?.cwd
   const policy = sandboxPolicy.resolve({ session: agent.session })
+  // Self-owned cancellation: the official command pipeline never aborts its
+  // signal from the Web UI (ui-commands executes without one, gateway falls
+  // back to NEVER_ABORTED_SIGNAL), so /bq must be able to abort this run.
+  // The invocation signal (whenever the UI does forward one) is bridged onto
+  // the same controller — either abort path stops the shell.
+  const controller = new AbortController()
+  running?.set(trimmed, { controller, startedAt: Date.now() })
+  const bridge = signal !== undefined && !signal.aborted ? () => controller.abort() : undefined
+  if (signal !== undefined && signal.aborted) controller.abort()
+  if (bridge !== undefined) signal!.addEventListener('abort', bridge, { once: true })
   try {
     const spec = shell.resolve({
       command: trimmed,
       ...(cwd !== undefined ? { workdir: cwd } : {}),
       sandboxPolicy: policy,
       timeoutMs,
-      ...(signal !== undefined ? { signal } : {}),
+      signal: controller.signal,
     })
     const result = await shell.run(spec)
     const textOf = (part: { text: string } | string): string =>
       typeof part === 'string' ? part : (part?.text ?? '')
     const output = [textOf(result.stdout), textOf(result.stderr)].filter(Boolean).join('\n')
     const exitCode = typeof result.exitCode === 'number' ? result.exitCode : -1
-    if (include) noteToSession(agent, trimmed, output || '(no output)')
+    if (include) noteToSession(agent, trimmed, output || '(no output)', exitCode)
     return { kind: exitCode === 0 ? 'success' : 'error', text: renderCardText(trimmed, exitCode, output, !include) }
   } catch (error) {
     return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+  } finally {
+    running?.delete(trimmed)
+    if (bridge !== undefined) signal!.removeEventListener('abort', bridge)
   }
 }
 
@@ -140,21 +162,47 @@ export function apply(ctx: Context): void {
   const shell = ctx.get('shell') as ShellLike | undefined
   const sandboxPolicy = ctx.get('sandboxPolicy') as SandboxPolicyLike | undefined
   if (commands === undefined || shell === undefined || sandboxPolicy === undefined) {
-    ctx.logger?.warn?.('bang: commands/shell/sandboxPolicy unavailable; /b /bb not registered')
+    ctx.logger?.warn?.('bang: commands/shell/sandboxPolicy unavailable; /b /bb /bq not registered')
     return
   }
+
+  /** Plugin-owned running registry: /bq aborts by exact command text (or the most recent when omitted). */
+  const running = new Map<string, RunningBang>()
 
   commands.register({
     name: 'b',
     description: 'Run a command quickly; result renders as a command card AND enters the conversation flow (model-visible in later turns, no turn is triggered)',
     input: { hint: '<command>' },
-    handler: ({ agent, rawInput, signal }) => executeBangCommand({ shell, sandboxPolicy }, agent, rawInput, true, signal),
+    handler: ({ agent, rawInput, signal }) => executeBangCommand({ shell, sandboxPolicy }, agent, rawInput, true, signal, running),
   })
 
   commands.register({
     name: 'bb',
     description: 'Run a command quickly; result renders as a command card ONLY, excluded from model context',
     input: { hint: '<command>' },
-    handler: ({ agent, rawInput, signal }) => executeBangCommand({ shell, sandboxPolicy }, agent, rawInput, false, signal),
+    handler: ({ agent, rawInput, signal }) => executeBangCommand({ shell, sandboxPolicy }, agent, rawInput, false, signal, running),
+  })
+
+  commands.register({
+    name: 'bq',
+    description: 'Cancel a running bang command: /bq <command> cancels by exact text, bare /bq cancels the most recent run',
+    input: { hint: '[<command>]' },
+    handler: ({ rawInput }) => {
+      const target = String(rawInput || '').trim()
+      if (target !== '') {
+        const entry = running.get(target)
+        if (entry === undefined) return { kind: 'error', text: 'no running bang command: ' + target }
+        entry.controller.abort()
+        return { kind: 'success', text: 'cancelled: ' + target }
+      }
+      // Most recent run (Map preserves insertion order; delete clears on settle).
+      let latest: { command: string; entry: RunningBang } | undefined
+      for (const [command, entry] of running) {
+        if (latest === undefined || entry.startedAt > latest.entry.startedAt) latest = { command, entry }
+      }
+      if (latest === undefined) return { kind: 'error', text: 'no running bang command' }
+      latest.entry.controller.abort()
+      return { kind: 'success', text: 'cancelled: ' + latest.command }
+    },
   })
 }
