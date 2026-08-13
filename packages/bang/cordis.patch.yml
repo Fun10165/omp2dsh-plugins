@@ -1,0 +1,8 @@
+# @omp2dsh/bang profile bundle patch: inserts the plugin row into any
+# profile that lists @omp2dsh/bang in its `dsh.profile.bundles`.
+# The row loads the Host plugin by package name; the Client half is picked up
+# through the package's `dsh.client` declaration (see AGENTS.md).
+
+- insert:
+    - id: bang
+      name: '@omp2dsh/bang'
