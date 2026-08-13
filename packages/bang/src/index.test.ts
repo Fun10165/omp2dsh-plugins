@@ -99,3 +99,39 @@ describe('bang v6 injected-note provenance marker', () => {
     assert.match(text, /自动注入/)
   })
 })
+
+describe('bang v7b signal forwarding (long commands must be cancellable)', () => {
+  it('forwards the invocation signal into the shell spec (fails pre-fix: spec had no signal)', async () => {
+    let seenSignal: unknown = undefined
+    const shell: ShellLike = {
+      resolve(request: Record<string, unknown>) {
+        seenSignal = request.signal
+        return { command: String(request.command), timeoutMs: 60000 }
+      },
+      async run() {
+        return { exitCode: 0, stdout: { text: 'ok' }, stderr: { text: '' } }
+      },
+    }
+    const signal = { aborted: false }
+    await executeBangCommand({ shell, sandboxPolicy: makePolicy() }, makeAgent(), 'sleep 100', false, signal as AbortSignal)
+    assert.equal(seenSignal, signal)
+  })
+
+  it('rejects immediately when the signal is already aborted (session must not hang)', async () => {
+    let ran = false
+    const shell: ShellLike = {
+      resolve(request: Record<string, unknown>) {
+        return { command: String(request.command), timeoutMs: 60000 }
+      },
+      async run() {
+        ran = true
+        return { exitCode: 0, stdout: { text: 'ok' }, stderr: { text: '' } }
+      },
+    }
+    const aborted = { aborted: true } as AbortSignal
+    const result = await executeBangCommand({ shell, sandboxPolicy: makePolicy() }, makeAgent(), 'sleep 100', false, aborted)
+    assert.equal(ran, false)
+    assert.equal(result.kind, 'error')
+    assert.match(result.text, /cancelled before execution/)
+  })
+})

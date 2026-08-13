@@ -46,7 +46,7 @@ export interface CommandRegistryLike {
     name: string
     description: string
     input?: { hint: string }
-    handler(invocation: { agent: AgentLike; rawInput: string }): unknown
+    handler(invocation: { agent: AgentLike; rawInput: string; signal?: AbortSignal }): unknown
   }): () => void
 }
 export interface AgentLike {
@@ -104,11 +104,14 @@ export async function executeBangCommand(deps: {
   shell: ShellLike
   sandboxPolicy: SandboxPolicyLike
   timeoutMs?: number
-}, agent: AgentLike, command: string, include: boolean): Promise<BangCardResult> {
+}, agent: AgentLike, command: string, include: boolean, signal?: AbortSignal): Promise<BangCardResult> {
   const { shell, sandboxPolicy, timeoutMs = 60_000 } = deps
   const trimmed = String(command ?? '').trim()
   if (!trimmed) {
     return { kind: 'error', text: 'empty command: use /b <command> or /bb <command>' }
+  }
+  if (signal?.aborted === true) {
+    return { kind: 'error', text: 'cancelled before execution' }
   }
   const cwd = agent.session?.header?.cwd
   const policy = sandboxPolicy.resolve({ session: agent.session })
@@ -118,6 +121,7 @@ export async function executeBangCommand(deps: {
       ...(cwd !== undefined ? { workdir: cwd } : {}),
       sandboxPolicy: policy,
       timeoutMs,
+      ...(signal !== undefined ? { signal } : {}),
     })
     const result = await shell.run(spec)
     const textOf = (part: { text: string } | string): string =>
@@ -144,13 +148,13 @@ export function apply(ctx: Context): void {
     name: 'b',
     description: 'Run a command quickly; result renders as a command card AND enters the conversation flow (model-visible in later turns, no turn is triggered)',
     input: { hint: '<command>' },
-    handler: ({ agent, rawInput }) => executeBangCommand({ shell, sandboxPolicy }, agent, rawInput, true),
+    handler: ({ agent, rawInput, signal }) => executeBangCommand({ shell, sandboxPolicy }, agent, rawInput, true, signal),
   })
 
   commands.register({
     name: 'bb',
     description: 'Run a command quickly; result renders as a command card ONLY, excluded from model context',
     input: { hint: '<command>' },
-    handler: ({ agent, rawInput }) => executeBangCommand({ shell, sandboxPolicy }, agent, rawInput, false),
+    handler: ({ agent, rawInput, signal }) => executeBangCommand({ shell, sandboxPolicy }, agent, rawInput, false, signal),
   })
 }

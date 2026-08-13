@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Forward the command invocation signal into the shell execution so long-running commands (e.g. `/b sleep 100`) are cancellable instead of holding the session; already-aborted signals reject before execution.
+
 ### Added
 
 - `createBangRunner` host core: `run` (shell + sandboxPolicy + session cwd), `note` (plugin user message into the session flow without waking the driver), `currentCwd`.
