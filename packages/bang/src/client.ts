@@ -7,82 +7,116 @@
  * are expanded by default (click the header to collapse). `/bb` cards carry
  * an explicit "excluded from context" label.
  *
- * This file runs in the DSH browser runtime, where `React`, `styles` and the
- * slot registry are injected globals — no imports, no JSX (plain JS source
- * compiled by tsc with ambient declarations).
+ * Contract (DSH packages/client/AGENTS.md): a client plugin exports only
+ * `inject` and `apply`; composition happens through `ctx.slots.inject` +
+ * `ctx.slots.register` inside `apply`. The build (tsdown, see
+ * tsdown.config.ts) wraps this file in `window.__ModuleLoader__.load` with
+ * react resolved from the loader module table.
  */
 
-/* Ambient browser-runtime globals (injected by the DSH client runtime). */
-declare const React: {
-  createElement(type: unknown, props: unknown, ...children: unknown[]): unknown
-  useState<T>(initial: T): [T, (next: T) => void]
-}
-declare const styles: { insert(css: string): () => void }
+import { createElement, useState, type CSSProperties, type ReactNode } from 'react'
+import type { ClientContext, CommandNode } from '@deepseek-ai/dsh-client-runtime/client'
+import type { CommandRowOwnerProps, CommandRowProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
+// Type-only: pulls the `conversation.chat.commandview` SlotMap declaration.
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 
-/** Ambient shape of the slot registry face used here. */
-interface SlotRegistryLike {
-  inject(key: string, callback: () => unknown): () => void
-  register(options: { name: string; key?: string; id?: string; order?: number }, component: (props: unknown) => unknown): () => void
-}
+/** Required services: the slot registry. */
+export const inject = ['slots']
 
-/** The command node projected from command/run + command/done. */
-export interface BangCommandNode {
-  kind: 'command'
-  seq: number
-  commandId: string
-  name: string | null
-  args: string | null
-  outcome: { kind: 'success' | 'error'; text?: string } | null
+/** Card state: running while unsettled; outcome kind after settlement. */
+type CardState = 'running' | 'success' | 'error'
+
+function stateOf(outcome: CommandRowOwnerProps['node']['outcome']): CardState {
+  if (outcome === null) return 'running'
+  return outcome.kind === 'error' ? 'error' : 'success'
 }
 
-/** Build the expanded-by-default card markup. Exported for reference; pure React rendering. */
-export function BangCardView(node: BangCommandNode, open: boolean, onToggle: () => void): unknown {
+/** CSS-in-JS, all values from the DSH `--dsw-alias-*` design tokens. */
+const rootStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  border: '1px solid var(--dsw-alias-border-l2)',
+  borderRadius: 8,
+  background: 'var(--dsw-alias-bg-layer-2)',
+  fontSize: 12,
+  lineHeight: 1.5,
+  color: 'var(--dsw-alias-label-primary)',
+  fontFamily: 'var(--dsw-font-family)',
+}
+const headStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  padding: '6px 10px',
+  cursor: 'pointer',
+  userSelect: 'none',
+}
+const chevStyle: CSSProperties = { opacity: 0.6, fontSize: 10, width: 12, textAlign: 'center' }
+const titleStyle: CSSProperties = { fontFamily: 'var(--ds-font-family-code)', fontWeight: 600 }
+const exclStyle: CSSProperties = { color: 'var(--dsw-alias-state-warn-primary)', fontSize: 11 }
+const stateStyle: CSSProperties = { marginLeft: 'auto', opacity: 0.75, fontSize: 11 }
+const bodyStyle: CSSProperties = {
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  padding: '6px 10px 8px',
+  borderTop: '1px solid var(--dsw-alias-border-l2)',
+  fontFamily: 'var(--ds-font-family-code)',
+  fontSize: 11,
+  maxHeight: 320,
+  overflow: 'auto',
+}
+const errorStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)' }
+
+/** Build the expanded-by-default card markup. Pure React rendering. */
+function BangCardView({ node, open, onToggle }: {
+  node: CommandNode
+  open: boolean
+  onToggle: () => void
+}): ReactNode {
   const name = node.name || ''
   const args = (node.args || '').trim()
   const outcome = node.outcome
   const running = outcome === null
-  const state = running ? 'Running…' : outcome.kind === 'success' ? 'Done' : 'Failed'
+  const state = stateOf(outcome)
   const body = running ? '' : (outcome.text || '')
   const isExcluded = name === 'bb'
-  return React.createElement('div', { className: 'bang-card' },
-    React.createElement('div', { className: 'head', onClick: onToggle },
-      React.createElement('span', { className: 'chev' }, open ? '▾' : '▸'),
-      React.createElement('span', { className: 'title' }, '/' + name + (args ? ' ' + args : '')),
-      isExcluded ? React.createElement('span', { className: 'excl' }, 'excluded from context') : null,
-      React.createElement('span', { className: 'state' }, state),
+  const stateLabel = running ? 'Running…' : state === 'success' ? 'Done' : 'Failed'
+
+  return createElement(
+    'div',
+    { style: rootStyle },
+    createElement(
+      'div',
+      { style: headStyle, onClick: onToggle },
+      createElement('span', { style: chevStyle }, open ? '▾' : '▸'),
+      createElement('span', { style: titleStyle }, '/' + name + (args ? ' ' + args : '')),
+      isExcluded ? createElement('span', { style: exclStyle }, 'excluded from context') : null,
+      createElement('span', { style: stateStyle }, stateLabel),
     ),
-    open && !running ? React.createElement('div', { className: 'body' }, body) : null,
+    open && !running
+      ? createElement('div', { style: state === 'error' ? { ...bodyStyle, ...errorStyle } : bodyStyle }, body)
+      : null,
   )
 }
 
-/** Register the /b and /bb command cards on the commandview slot. */
-export function registerBangCardViews(slots: SlotRegistryLike): () => void {
-  const css =
-    '.bang-card{display:flex;flex-direction:column;border:1px solid var(--border-1,rgba(128,128,128,.25));border-radius:8px;background:var(--bg-2,rgba(128,128,128,.06));font-size:12px;line-height:1.5;color:var(--text-1,#d8dee9);font-family:var(--font-family,system-ui)}' +
-    '.bang-card .head{display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;user-select:none}' +
-    '.bang-card .head:hover{background:var(--bg-2,rgba(128,128,128,.1))}' +
-    '.bang-card .chev{opacity:.6;font-size:10px;width:12px;text-align:center}' +
-    '.bang-card .title{font-family:ui-monospace,monospace;font-weight:600}' +
-    '.bang-card .state{margin-left:auto;opacity:.75;font-size:11px}' +
-    '.bang-card .excl{color:#e6b450;font-size:11px}' +
-    '.bang-card .body{white-space:pre-wrap;word-break:break-word;padding:6px 10px 8px;border-top:1px solid var(--border-1,rgba(128,128,128,.15));font-family:ui-monospace,monospace;font-size:11px;max-height:320px;overflow:auto}'
-  const disposeStyle = styles.insert(css)
+/** Keyed commandview registrant: expanded by default, one per command name. */
+function BangCard({ node }: CommandRowProps): ReactNode {
+  const [open, setOpen] = useState(true)
+  return createElement(BangCardView, { node, open, onToggle: () => setOpen((value) => !value) })
+}
 
-  const Card = (props: { node: BangCommandNode }): unknown => {
-    const [open, setOpen] = React.useState(true) // expanded by default: users run bang to see output
-    return BangCardView(props.node, open, () => setOpen(!open))
-  }
-
-  const disposers: Array<() => void> = []
+/**
+ * Client plugin body: register the `/b` and `/bb` cards on the
+ * conversation's keyed commandview hole. Waiting on the declaration mirrors
+ * the official registrants: a direct register racing the declaration fails
+ * boot.
+ * @param ctx - client root context.
+ */
+export function apply(ctx: ClientContext): void {
   for (const key of ['b', 'bb']) {
-    slots.inject('conversation.chat.commandview', () => {
-      const dispose = slots.register({ name: 'conversation.chat.commandview', key }, (props: unknown) => React.createElement(Card, props as { node: BangCommandNode }))
-      disposers.push(dispose)
-      return dispose
-    })
-  }
-  return () => {
-    disposeStyle()
-    for (const dispose of disposers) dispose()
+    ctx.slots.inject('conversation.chat.commandview', () => ctx.slots.register(
+      { name: 'conversation.chat.commandview', key },
+      BangCard,
+    ))
   }
 }
