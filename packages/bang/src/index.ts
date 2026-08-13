@@ -70,6 +70,15 @@ export function renderCardText(command: string, exitCode: number, output: string
   )
 }
 
+/** The injected message text: explicit provenance so the model never mistakes it for user-typed input. */
+export function noteText(command: string, output: string): string {
+  return (
+    '> /b ' + command +
+    '：用户执行指令的输出（由 bang 插件自动注入，非用户直接输入；仅作上下文参考，除非用户要求否则无需回应）' +
+    '\n\n```\n' + output + '\n```'
+  )
+}
+
 /** Append the result to the session flow (in-context, no wake). */
 export function noteToSession(agent: AgentLike, command: string, output: string): boolean {
   if (agent.session === undefined || typeof agent.session.append !== 'function') return false
@@ -79,7 +88,7 @@ export function noteToSession(agent: AgentLike, command: string, output: string)
       {
         id: 'bang-' + Date.now() + '-' + Math.floor(Math.random() * 1e9),
         role: 'user',
-        content: [{ type: 'text', text: '> /b ' + command + '\n\n```\n' + output + '\n```' }],
+        content: [{ type: 'text', text: noteText(command, output) }],
         source: { kind: 'plugin', plugin: 'bang' },
       },
       { surfaceOp: 'append' },

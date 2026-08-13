@@ -20,6 +20,7 @@ import {
   renderCardText,
   executeBangCommand,
   noteToSession,
+  noteText,
   type ShellLike,
   type SandboxPolicyLike,
   type AgentLike,
@@ -87,5 +88,14 @@ describe('bang v5 /b vs /bb context split (session.append without wake)', () => 
 
   it('noteToSession returns false without a session (no silent crash)', () => {
     assert.equal(noteToSession({} as AgentLike, 'ls', 'x'), false)
+  })
+})
+
+describe('bang v6 injected-note provenance marker', () => {
+  it('noteText carries an explicit provenance marker (fails on v5: no marker existed)', () => {
+    const text = noteText('ls', 'out:ls')
+    assert.match(text, /> \/b ls/)
+    assert.match(text, /非用户直接输入/)
+    assert.match(text, /自动注入/)
   })
 })
