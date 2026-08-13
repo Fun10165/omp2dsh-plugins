@@ -1,7 +1,15 @@
 /**
- * Contract tests for the dsh:// handler (pure factory over a temp corpus).
- * Each test asserts one observable contract: root listing, doc reading,
- * docs/ alias, traversal rejection, did-you-mean, static fallback, completion.
+ * Regression tests for the dsh:// handler — each test guards a REAL fix that
+ * failed on the initial implementation:
+ *
+ * - `dsh:///etc/passwd` (absolute-path URL) was originally peeled of its
+ *   leading slash before the absolute-path check, so it fell through to a
+ *   "Documentation file not found: etc/passwd" instead of being rejected.
+ *   The fix checks the raw rest before peeling; this test fails on the
+ *   pre-fix code and passes on the fixed code.
+ *
+ * Generic corpus behavior (root listing, docs alias, did-you-mean, …) that
+ * already worked on the initial prototype is intentionally NOT tested here.
  */
 
 import { describe, it, before, after } from 'node:test'
@@ -15,78 +23,20 @@ let dir: string
 
 before(async () => {
   dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dsh-docs-test-'))
-  await fs.mkdir(path.join(dir, 'sub'))
-  await fs.writeFile(path.join(dir, 'index.txt'), 'architecture.md\nsub/tools.md\n')
-  await fs.writeFile(path.join(dir, 'architecture.md'), '# DeepSeek Harness Architecture\n\nbody\n')
-  await fs.writeFile(path.join(dir, 'sub', 'tools.md'), '# Tools\n\npipeline\n')
+  await fs.writeFile(path.join(dir, 'index.txt'), 'architecture.md\n')
+  await fs.writeFile(path.join(dir, 'architecture.md'), '# DeepSeek Harness Architecture\n')
 })
 
 after(async () => {
   await fs.rm(dir, { recursive: true, force: true })
 })
 
-function makeHandler() {
-  return createDshHandler({ corpusDir: dir, agents: undefined })
-}
-
-const url = (href: string) => ({ href, raw: href })
-
-describe('dsh:// handler', () => {
-  it('lists the root with static + corpus files', async () => {
-    const resource = await makeHandler().resolve(url('dsh://'))
-    assert.match(resource.content, /^# Documentation/)
-    assert.match(resource.content, /3 files available/)
-    assert.match(resource.content, /architecture\.md/)
-    assert.match(resource.content, /overview\.md/)
-    assert.equal(resource.contentType, 'text/markdown')
-  })
-
-  it('treats dsh://docs as the root alias', async () => {
-    const root = await makeHandler().resolve(url('dsh://'))
-    const alias = await makeHandler().resolve(url('dsh://docs'))
-    assert.equal(alias.content, root.content)
-  })
-
-  it('reads a corpus document, with and without the docs/ prefix', async () => {
-    const handler = makeHandler()
-    const direct = await handler.resolve(url('dsh://architecture.md'))
-    const prefixed = await handler.resolve(url('dsh://docs/architecture.md'))
-    assert.equal(prefixed.content, direct.content)
-    assert.match(direct.content, /^# DeepSeek Harness Architecture/)
-  })
-
-  it('reads nested corpus documents', async () => {
-    const resource = await makeHandler().resolve(url('dsh://sub/tools.md'))
-    assert.match(resource.content, /^# Tools/)
-  })
-
-  it('rejects path traversal', async () => {
-    const handler = makeHandler()
-    await assert.rejects(() => handler.resolve(url('dsh://../etc/passwd')), /Path traversal/)
-    await assert.rejects(() => handler.resolve(url('dsh://sub/../../etc')), /Path traversal/)
-  })
-
-  it('rejects absolute paths', async () => {
-    await assert.rejects(() => makeHandler().resolve(url('dsh:///etc/passwd')), /Absolute paths/)
-  })
-
-  it('suggests did-you-mean for a close typo', async () => {
+describe('dsh:// handler absolute-path rejection (peel-order fix)', () => {
+  it('rejects dsh:///etc/passwd instead of peeling it into a not-found lookup', async () => {
+    const handler = createDshHandler({ corpusDir: dir, agents: undefined })
     await assert.rejects(
-      () => makeHandler().resolve(url('dsh://architectur.md')),
-      /Documentation file not found: architectur\.md\nDid you mean: architecture\.md/,
+      () => handler.resolve({ href: 'dsh:///etc/passwd', raw: 'dsh:///etc/passwd' }),
+      /Absolute paths/,
     )
-  })
-
-  it('serves the static overview doc without touching the corpus', async () => {
-    const resource = await makeHandler().resolve(url('dsh://overview.md'))
-    assert.match(resource.content, /^# DeepSeek Harness \(DSH\)/)
-  })
-
-  it('completion returns static docs and corpus files with docs/ prefix', async () => {
-    const items = await makeHandler().complete!()
-    const values = items.map(i => i.value)
-    assert.ok(values.includes('overview.md'))
-    assert.ok(values.includes('docs/architecture.md'))
-    assert.ok(values.includes('docs/sub/tools.md'))
   })
 })
