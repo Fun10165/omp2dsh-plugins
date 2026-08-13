@@ -54,8 +54,10 @@ packages/<name>/
 - 每个包独立 `build` / `typecheck` / `test`（node:test，不引测试框架）。
 - **client half 契约（强制）**：有浏览器 UI 的包必须按官方 client 插件契约——入口只导出
   `inject`/`apply`，tsdown 以 `__ModuleLoader__.load` 包裹产出 `lib/client.js`，样式用官方
-  `--dsw-alias-*` token，`dsh.client` 声明 platform/inject。禁止裸 ESM 导出（fsck 报
-  `loaded without registering`）。详细见 docs/plugin-development-experience.md §9。
+  `--dsw-alias-*` token，`dsh.client` 声明 platform/inject。**inject 必须覆盖 apply 里
+  访问的每个 ctx 服务**（如 `ctx.remote` 需声明 `'remote'` + `'remote.commands'`，漏声明
+  直接页面崩溃）。禁止裸 ESM 导出（fsck 报 `loaded without registering`）。详细见
+  docs/plugin-development-experience.md §9。
 
 ## 5. 质量门槛（合并前必须全绿）
 

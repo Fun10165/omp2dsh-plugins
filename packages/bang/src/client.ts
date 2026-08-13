@@ -21,8 +21,8 @@ import type { CommandRowOwnerProps, CommandRowProps } from '@deepseek-ai/dsh-cli
 // Type-only: pulls the `conversation.chat.commandview` SlotMap declaration.
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 
-/** Required services: the slot registry. */
-export const inject = ['slots']
+/** Required services: the slot registry and the Typert client remote (cancel via /bq). */
+export const inject = ['slots', 'remote', 'remote.commands']
 
 /** Card state: running while unsettled; outcome kind after settlement. */
 type CardState = 'running' | 'success' | 'error'

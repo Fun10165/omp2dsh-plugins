@@ -115,6 +115,11 @@ function-calling schema 是早期快照**——本会话注册的 `read_uri` 在
    `@deepseek-ai/dsh-client-ui-conversation/client` 导入（type-only，SlotMap 声明合并）。
 7. **包声明**：`dsh.client: { platform: 'web', inject: [...] }`；devDeps 加 tsdown/react/@types/react/
    dsh-client-runtime/dsh-client-ui-conversation（版本对齐宿主）。
+8. **inject 必须覆盖 apply 里访问的每个服务**（bang 实测踩坑）：cordis 的 proxy get 对未注入
+   属性直接抛 `cannot get property "remote" without inject`。Client 端要用 `ctx.remote`
+   派发命令，`inject` 必须声明 `['slots', 'remote', 'remote.commands']`（`remote` 由
+   `@deepseek-ai/dsh-api-gateway` 提供，`remote.commands` 是其命名空间服务）——只写
+   `['slots']` 会页面级崩溃。写 Client 代码前先列全 apply 里触碰的 ctx 属性，逐一带进 inject。
 
 **omdsh-dev 档案补充**（`omdsh-dev/dsh-plugin-dev`，本仓库开发前应读）：
 - **cordis 双副本**：插件编译期 `cordis` 必须解析到 DSH 的 vendor 副本（不是 .pnpm），否则
