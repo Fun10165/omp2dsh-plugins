@@ -1,21 +1,23 @@
 /**
  * bang — `!` prefix quick command runner (port of omp's bang/bash input modes).
  *
- * Host half. Two responsibilities, both tiny:
- *  1. `run(command)`: execute through the DSH shell service with the calling
- *     session's cwd and resolved sandbox policy — the same path the bash tool
- *     takes, so behavior stays predictable and GUI launchers (`zed .`,
- *     `code .`) are NOT blocked by the file sandbox (the sandbox constrains
- *     file writes, not command execution).
- *  2. `note(text)`: write a plugin-sourced user message into the session flow
- *     WITHOUT waking the driver. DSH philosophy: anything visible in the Web
- *     UI is part of context — so `!cmd` results become a durable session
- *     message the model sees in later turns; `!!cmd` results never call
- *     `note` and stay in the client dock, explicitly labeled.
+ * Architecture (all official DSH mechanisms, no invented rendering):
+ *  1. Registers the `bang` command on the commands service (`/bang <cmd>`).
+ *  2. The client button maps `!cmd` -> `/bang cmd` and `!!cmd` -> `/bang !!cmd`
+ *     and dispatches through `commands.execute` via a thin Host RPC bridge.
+ *  3. The commands service logs `command/run` + `command/done` on the session
+ *     and the Web UI renders them as a PERSISTENT command card in the
+ *     conversation flow — the chat log is the record, history stays readable.
+ *  4. Nothing is submitted to the model: the card is the only outcome. `!!`
+ *     adds an explicit "excluded from context" label to the card text.
+ *
+ * Execution runs through the DSH shell service with the session's cwd and
+ * resolved sandbox policy — the same path the bash tool takes. GUI launchers
+ * (`zed .`, `code .`) are NOT blocked by the file sandbox (the sandbox
+ * constrains file writes, not command execution).
  *
  * Design rules (repo AGENTS.md): KISS — no runtime deps beyond the DSH
- * runtime; decoupling — the runner knows nothing about the UI/dock/trigger
- * wiring (all client-side).
+ * runtime; decoupling — the runner knows nothing about the UI.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -24,7 +26,7 @@ import type { Context } from '@deepseek-ai/cordis'
 export const name = 'bang'
 
 /** Services this plugin hard-depends on. */
-export const inject = ['shell', 'sandboxPolicy', 'agents']
+export const inject = ['commands', 'shell', 'sandboxPolicy', 'agents']
 
 /** Minimal faces of the injected services (subset of the DSH contracts). */
 export interface ShellLike {
@@ -39,118 +41,110 @@ export interface ShellLike {
 export interface SandboxPolicyLike {
   resolve(request?: { session?: unknown }): unknown
 }
-export interface AgentsLike {
-  currentInitiator(): { session?: { header?: { cwd?: string } } } | undefined
+export interface CommandRegistryLike {
+  register(definition: {
+    name: string
+    description: string
+    input?: { hint: string }
+    handler(invocation: { agent: { session?: { header?: { cwd?: string } } }; rawInput: string }): unknown
+  }): () => void
+  execute(agent: unknown, line: string, signal: { aborted: boolean }): Promise<unknown>
 }
 
-/** One execution outcome, JSON-safe for the client dock. */
-export interface BangRunResult {
-  ok: boolean
-  exitCode?: number
-  stdout?: string
-  stderr?: string
-  timedOut?: boolean
-  cwd?: string | null
-  error?: string
+/** One command-card outcome (the official CommandResult shape). */
+export type BangCardResult =
+  | { kind: 'success'; text: string }
+  | { kind: 'error'; text: string }
+
+/** Parse the raw command input after `/bang`: `cmd` or `!!cmd`. */
+export function parseBangInput(rawInput: string): { command: string; exclude: boolean } | null {
+  const trimmed = String(rawInput ?? '').trim()
+  if (trimmed.startsWith('!!')) {
+    const command = trimmed.slice(2).trim()
+    return command ? { command, exclude: true } : null
+  }
+  if (trimmed.startsWith('!')) {
+    const command = trimmed.slice(1).trim()
+    return command ? { command, exclude: false } : null
+  }
+  const command = trimmed
+  return command ? { command, exclude: false } : null
 }
 
-/** The client-facing surface the package exposes (Remote/HTTP wiring lives in the host apply). */
-export interface BangService {
-  run(command: string, signal?: AbortSignal): Promise<BangRunResult>
-  /** Inject a plugin user message into the session flow without waking the driver. */
-  note(text: string): { ok: boolean; error?: string }
-  currentCwd(): string | null
+/** Build the card text: plain ASCII, no emoji. */
+export function renderCardText(command: string, exitCode: number, output: string, exclude: boolean): string {
+  const body = output || '(no output)'
+  return (
+    '[exit ' + exitCode + '] ' + command + '\n\n' + body +
+    (exclude ? '\n\nExcluded from context: visible on this card only.' : '')
+  )
 }
 
-/** Create the runner core (pure logic, testable without cordis). */
-export function createBangRunner(deps: {
+/** Execute one bang invocation inside a command handler; returns the card result. */
+export async function executeBangCommand(deps: {
   shell: ShellLike
   sandboxPolicy: SandboxPolicyLike
-  agents?: AgentsLike
   timeoutMs?: number
-}): BangService {
-  const { shell, sandboxPolicy, agents, timeoutMs = 60_000 } = deps
-
-  function currentCwd(): string | null {
-    const agent = agents?.currentInitiator()
-    return agent?.session?.header?.cwd ?? null
-  }
-
-  async function run(command: string, signal?: AbortSignal): Promise<BangRunResult> {
-    const trimmed = command.trim()
-    if (!trimmed) return { ok: false, error: 'empty command' }
-    const agent = agents?.currentInitiator()
-    const cwd = agent?.session?.header?.cwd
-    const policy = agent !== undefined ? sandboxPolicy.resolve({ session: agent.session }) : sandboxPolicy.resolve()
-    try {
-      const spec = shell.resolve({
-        command: trimmed,
-        ...(cwd !== undefined ? { workdir: cwd } : {}),
-        sandboxPolicy: policy,
-        timeoutMs,
-        ...(signal !== undefined ? { signal } : {}),
-      })
-      const result = await shell.run(spec)
-      const textOf = (part: { text: string } | string): string =>
-        typeof part === 'string' ? part : (part?.text ?? '')
-      return {
-        ok: true,
-        exitCode: typeof result.exitCode === 'number' ? result.exitCode : -1,
-        stdout: textOf(result.stdout),
-        stderr: textOf(result.stderr),
-        timedOut: result.timedOut === true,
-        cwd: cwd ?? null,
-      }
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+}, agent: { session?: { header?: { cwd?: string } } }, rawInput: string): Promise<BangCardResult> {
+  const { shell, sandboxPolicy, timeoutMs = 60_000 } = deps
+  const parsed = parseBangInput(rawInput)
+  if (parsed === null) return { kind: 'error', text: 'empty command: use !<command> or !!<command>' }
+  const { command, exclude } = parsed
+  const cwd = agent.session?.header?.cwd
+  const policy = sandboxPolicy.resolve({ session: agent.session })
+  try {
+    const spec = shell.resolve({
+      command,
+      ...(cwd !== undefined ? { workdir: cwd } : {}),
+      sandboxPolicy: policy,
+      timeoutMs,
+    })
+    const result = await shell.run(spec)
+    const textOf = (part: { text: string } | string): string =>
+      typeof part === 'string' ? part : (part?.text ?? '')
+    const output = [textOf(result.stdout), textOf(result.stderr)].filter(Boolean).join('\n')
+    const exitCode = typeof result.exitCode === 'number' ? result.exitCode : -1
+    return {
+      kind: exitCode === 0 ? 'success' : 'error',
+      text: renderCardText(command, exitCode, output, exclude),
     }
+  } catch (error) {
+    return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
   }
-
-  function note(text: string): { ok: boolean; error?: string } {
-    if (!text) return { ok: false, error: 'empty text' }
-    const agent = agents?.currentInitiator() as
-      | { session?: { append(type: 'user/message', data: unknown, intent: { surfaceOp: 'append' }): unknown } }
-      | undefined
-    if (agent === undefined || agent.session === undefined || typeof agent.session.append !== 'function') {
-      return { ok: false, error: 'no active session' }
-    }
-    try {
-      // Append the plugin user message to the SESSION LOG + surface: it shows
-      // in the conversation flow immediately, is durable, and the model sees
-      // it in later turns — visible in the Web UI == in context, for real.
-      agent.session.append(
-        'user/message',
-        {
-          id: 'bang-' + Date.now() + '-' + Math.floor(Math.random() * 1e9),
-          role: 'user',
-          content: [{ type: 'text', text }],
-          source: { kind: 'plugin', plugin: 'bang' },
-        },
-        { surfaceOp: 'append' },
-      )
-      return { ok: true }
-    } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-
-  return { run, note, currentCwd }
 }
 
+/** A never-aborting signal shape (dynamic sandbox has no AbortController). */
+export const NEVER_SIGNAL = { aborted: false, addEventListener() {}, removeEventListener() {} }
+
 export function apply(ctx: Context): void {
+  const commands = ctx.get('commands') as CommandRegistryLike | undefined
   const shell = ctx.get('shell') as ShellLike | undefined
   const sandboxPolicy = ctx.get('sandboxPolicy') as SandboxPolicyLike | undefined
-  const agents = ctx.get('agents') as AgentsLike | undefined
-  if (shell === undefined || sandboxPolicy === undefined) {
-    ctx.logger?.warn?.('bang: shell/sandboxPolicy unavailable; runner not mounted')
+  const agents = ctx.get('agents') as { currentInitiator(): unknown } | undefined
+  if (commands === undefined || shell === undefined || sandboxPolicy === undefined) {
+    ctx.logger?.warn?.('bang: commands/shell/sandboxPolicy unavailable; /bang not registered')
     return
   }
-  const service = createBangRunner({ shell, sandboxPolicy, agents })
 
-  // RPC surface for the client dock.
-  // In the bundled package this is the @Remote seam: the dynamic-plugin
-  // prototype wires the same three methods through harness.handle
-  // ('bang/run', 'bang/note', 'bang/cwd'). Keep method names identical so
-  // the client half is transport-agnostic.
-  ctx.provide('bang', service)
+  commands.register({
+    name: 'bang',
+    description: '! prefix quick command runner: result renders as a command card; !! prefix adds an excluded-from-context label',
+    input: { hint: '<command> or !!<command>' },
+    handler: ({ agent, rawInput }) =>
+      executeBangCommand({ shell, sandboxPolicy }, agent, rawInput),
+  })
+
+  // Thin RPC bridge: client button -> official command pipeline.
+  // (Dynamic-plugin prototype wires this through harness.handle('bang/exec');
+  // the bundled package can expose the same method via @Remote.)
+  ;(ctx as unknown as { bangBridge?: { execute(line: string): Promise<unknown> } }).bangBridge = {
+    execute: (line: string) => {
+      const agent = agents?.currentInitiator()
+      if (agent === undefined) return Promise.resolve({ ok: false, error: 'no active agent' })
+      return commands.execute(agent, line, NEVER_SIGNAL).then(
+        (execution) => (execution === undefined ? { ok: false, error: 'unknown command: ' + line } : { ok: true }),
+        (error: unknown) => ({ ok: false, error: error instanceof Error ? error.message : String(error) }),
+      )
+    },
+  }
 }
