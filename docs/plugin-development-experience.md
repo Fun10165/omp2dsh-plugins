@@ -90,6 +90,10 @@ function-calling schema 是早期快照**——本会话注册的 `read_uri` 在
 - 验证"模型能否调用某工具"要在**新会话**做，旧会话的快照会误导判断。
 - `Tool.listTools`（inspect）显示注册表视图，不等于当前回合 schema——两者管道不同
   （注册表 vs `systemPrompt.assemble` 的 `wireSchemas(scope)`）。
+- **子代理是新回合工具集的可靠试用载体**：召唤子代理（后台）即可拿到包含全部后注册
+  工具的干净工具集——验证新工具（如 read_uri）的首选途径，且不占用主会话回合。
+  子代理在后台运行时，主 agent 可并行做其他独立工作（文档、代码、更多子代理），
+  完成时自动收到通知——无需串行等待。
 
 ## 9. Client 插件契约：`__ModuleLoader__.load`（bang 实测踩坑，重要）
 
