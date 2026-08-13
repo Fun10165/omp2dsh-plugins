@@ -91,7 +91,37 @@ function-calling schema 是早期快照**——本会话注册的 `read_uri` 在
 - `Tool.listTools`（inspect）显示注册表视图，不等于当前回合 schema——两者管道不同
   （注册表 vs `systemPrompt.assemble` 的 `wireSchemas(scope)`）。
 
-## 9. 一句话总结
+## 9. Client 插件契约：`__ModuleLoader__.load`（bang 实测踩坑，重要）
+
+**坑**：client half 用裸 ESM 导出 + 手写 slots 参数 → fsck 报
+`loaded without registering "<id>" via __ModuleLoader__.load`，client 静默不挂载。
+
+**官方契约**（`deepseek-harness/packages/client/AGENTS.md` + `tsdown.client.ts` preset）：
+
+1. **注册**：browser bundle 必须以 `window.__ModuleLoader__.load({ id, factory: (require) => {...} })`
+   包裹（loader 模块表持有 react 等平台模块；`require` 从表中解析 external）。
+2. **入口导出纪律**：client 入口**只导出 `inject` 和 `apply`**——没有其他导出。
+3. **apply(ctx: ClientContext)**：通过 `ctx.slots.inject('…', () => ctx.slots.register({name, key}, Component))`
+   挂载 UI；**等待声明**（inject）再 register，直接 register 会竞态失败。
+4. **构建**：tsdown browser bundle（`format: cjs`、`platform: browser`、react/平台模块 external、
+   banner/footer 包裹 `__ModuleLoader__.load`）；与 tsc node half 共用 lib/（`clean: false`）。
+5. **样式**：用官方 design tokens（`--dsw-alias-*`、`--ds-font-family-code` 等），**不要**自造 CSS 变量
+   （明暗主题跟随失效）。
+6. **类型**：`CommandRowProps`/`CommandNode` 等从 `@deepseek-ai/dsh-client-runtime/client`、
+   `@deepseek-ai/dsh-client-ui-conversation/client` 导入（type-only，SlotMap 声明合并）。
+7. **包声明**：`dsh.client: { platform: 'web', inject: [...] }`；devDeps 加 tsdown/react/@types/react/
+   dsh-client-runtime/dsh-client-ui-conversation（版本对齐宿主）。
+
+**omdsh-dev 档案补充**（`omdsh-dev/dsh-plugin-dev`，本仓库开发前应读）：
+- **cordis 双副本**：插件编译期 `cordis` 必须解析到 DSH 的 vendor 副本（不是 .pnpm），否则
+  `ctx.tools` 类型增强合并失败（`Property 'tools' does not exist on type 'Context'`）。
+- **tsconfig 三件套**：`allowImportingTsExtensions` / `rewriteRelativeImportExtensions` /
+  `lib: ["ES2024"]`。
+- **运行时依赖**：peer 依赖经 profile fallback 解析（`healProfilesModuleFallback`），与编译期
+  解析一致；`link:` 依赖改源码后**重构建 + 重启**生效，无需重新 add。
+- **形态选择**：默认 bundle；registry 面板生命周期才用 registry 原生形态；纯流程用 skill。
+
+## 10. 一句话总结
 
 > **DSH 插件开发的正确姿势：先读文档和源码确认官方机制 → 用官方插槽/服务/事件组合能力 →
 > 绝不伪造运行时数据（tool result、消息角色）→ 每次真实 bug 修复补一条回归测试 →

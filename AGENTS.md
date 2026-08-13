@@ -52,6 +52,10 @@ packages/<name>/
 - `name`（插件名）必须与 `cordis.patch.yml` 的 row id 一致。
 - 依赖关系只允许 `workspace:*` 指向本仓库其他包；peerDependencies 声明 cordis / dsh 运行时。
 - 每个包独立 `build` / `typecheck` / `test`（node:test，不引测试框架）。
+- **client half 契约（强制）**：有浏览器 UI 的包必须按官方 client 插件契约——入口只导出
+  `inject`/`apply`，tsdown 以 `__ModuleLoader__.load` 包裹产出 `lib/client.js`，样式用官方
+  `--dsw-alias-*` token，`dsh.client` 声明 platform/inject。禁止裸 ESM 导出（fsck 报
+  `loaded without registering`）。详细见 docs/plugin-development-experience.md §9。
 
 ## 5. 质量门槛（合并前必须全绿）
 
