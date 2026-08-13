@@ -109,19 +109,24 @@ export function createBangRunner(deps: {
   function note(text: string): { ok: boolean; error?: string } {
     if (!text) return { ok: false, error: 'empty text' }
     const agent = agents?.currentInitiator() as
-      | { send(message: unknown, target: 'next-turn' | 'next-step', wakeup: boolean): void }
+      | { session?: { append(type: 'user/message', data: unknown, intent: { surfaceOp: 'append' }): unknown } }
       | undefined
-    if (agent === undefined) return { ok: false, error: 'no active agent' }
+    if (agent === undefined || agent.session === undefined || typeof agent.session.append !== 'function') {
+      return { ok: false, error: 'no active session' }
+    }
     try {
-      agent.send(
+      // Append the plugin user message to the SESSION LOG + surface: it shows
+      // in the conversation flow immediately, is durable, and the model sees
+      // it in later turns — visible in the Web UI == in context, for real.
+      agent.session.append(
+        'user/message',
         {
           id: 'bang-' + Date.now() + '-' + Math.floor(Math.random() * 1e9),
           role: 'user',
           content: [{ type: 'text', text }],
           source: { kind: 'plugin', plugin: 'bang' },
         },
-        'next-turn',
-        false,
+        { surfaceOp: 'append' },
       )
       return { ok: true }
     } catch (error) {
