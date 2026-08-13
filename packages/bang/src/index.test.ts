@@ -1,48 +1,91 @@
 /**
- * Regression tests for bang — each test guards a REAL fix that failed on the
- * initial prototype and only passes on the fixed architecture:
+ * Regression tests for bang — each test guards a REAL fix that failed on an
+ * earlier version and only passes on the fixed architecture:
  *
- * - v3 fix: `!cmd`/`!!cmd` now dispatch through the official command pipeline
- *   (`/bang <cmd>`), which renders a persistent command card in the flow
- *   instead of the removed dock; `bangLine`/`executeBang` exist only since
- *   that fix.
- * - v4 fix: the steer injection (which triggered a model turn) was removed
- *   and card text is plain ASCII without emoji; `renderCardText` asserts the
- *   fixed card shape and the explicit excluded-from-context label.
+ * - v4 fix: card text is plain ASCII without emoji; the excluded label is
+ *   explicit (`renderCardText`).
+ * - v5 fix: `/b` (in-context) appends the result to the session flow via
+ *   `session.append` WITHOUT waking the driver, while `/bb` (excluded) never
+ *   touches the session flow. `executeBangCommand(include=true)` fails on
+ *   v4 (no append existed); `include=false` must NOT append. Also fixes the
+ *   ill-formed `/bang !!ls` hybrid by splitting into two commands.
  *
  * Generic shell/pipeline behavior that already worked on the initial
- * prototype is intentionally NOT tested here (no value, no regression).
+ * prototype is intentionally NOT tested here.
  */
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { renderCardText } from './index.js'
-import { bangLine, executeBang, type BangRpc } from './client.js'
+import {
+  renderCardText,
+  executeBangCommand,
+  noteToSession,
+  type ShellLike,
+  type SandboxPolicyLike,
+  type AgentLike,
+} from './index.js'
 
-describe('bang v4 card text (steer removed, ASCII only)', () => {
+function makeShell(): ShellLike {
+  return {
+    resolve(request) {
+      return { command: String(request.command), workdir: String(request.workdir ?? ''), timeoutMs: 60000 }
+    },
+    async run(spec) {
+      return { exitCode: 0, stdout: { text: 'out:' + spec.command }, stderr: { text: '' } }
+    },
+  }
+}
+
+function makePolicy(): SandboxPolicyLike {
+  return { resolve: () => ({ mode: 'workspace-write' }) }
+}
+
+function makeAgent(): AgentLike & { appended: unknown[] } {
+  const agent = {
+    session: {
+      header: { cwd: '/ws' },
+      append: function (_type: 'user/message', data: unknown, _intent: { surfaceOp: 'append' }) {
+        agent.appended.push(data)
+      },
+    },
+  } as unknown as AgentLike & { appended: unknown[] }
+  agent.appended = []
+  return agent
+}
+
+describe('bang v4 card text (ASCII, no emoji)', () => {
   it('renders exit code, command and output in plain ASCII — no emoji since the v4 fix', () => {
     const text = renderCardText('ls', 0, 'a\nb', false)
     assert.equal(text, '[exit 0] ls\n\na\nb')
     assert.doesNotMatch(text, /[\u{1F300}-\u{1FAFF}]/u)
   })
 
-  it('appends the explicit excluded-from-context label for !!', () => {
+  it('appends the explicit excluded-from-context label', () => {
     const text = renderCardText('ls', 0, 'secret', true)
     assert.match(text, /Excluded from context: visible on this card only\./)
   })
 })
 
-describe('bang v3 official pipeline mapping (dock removed)', () => {
-  it('maps !cmd to the /bang command line', () => {
-    assert.equal(bangLine({ command: 'zed .', exclude: false }), '/bang zed .')
-    assert.equal(bangLine({ command: 'ls', exclude: true }), '/bang !!ls')
+describe('bang v5 /b vs /bb context split (session.append without wake)', () => {
+  it('/b include=true appends the result to the session flow (fails on v4: no append existed)', async () => {
+    const agent = makeAgent()
+    const result = await executeBangCommand({ shell: makeShell(), sandboxPolicy: makePolicy() }, agent, 'ls', true)
+    assert.equal(result.kind, 'success')
+    assert.equal(agent.appended.length, 1)
+    const message = agent.appended[0] as { role: string; content: Array<{ type: string; text: string }> }
+    assert.equal(message.role, 'user')
+    assert.match(message.content[0]!.text, /out:ls/)
   })
 
-  it('dispatches through the rpc seam without any model injection', async () => {
-    const lines: string[] = []
-    const rpc: BangRpc = { exec: async (line) => { lines.push(line); return { ok: true } } }
-    const ok = await executeBang(rpc, { command: 'ls', exclude: true })
-    assert.equal(ok, true)
-    assert.deepEqual(lines, ['/bang !!ls'])
+  it('/bb include=false NEVER appends to the session flow (excluded)', async () => {
+    const agent = makeAgent()
+    const result = await executeBangCommand({ shell: makeShell(), sandboxPolicy: makePolicy() }, agent, 'ls', false)
+    assert.equal(result.kind, 'success')
+    assert.equal(agent.appended.length, 0)
+    assert.match(result.text, /Excluded from context/)
+  })
+
+  it('noteToSession returns false without a session (no silent crash)', () => {
+    assert.equal(noteToSession({} as AgentLike, 'ls', 'x'), false)
   })
 })
