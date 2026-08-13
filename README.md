@@ -10,7 +10,7 @@
 |---|---|---|---|
 | [`@omp2dsh/uri-registry`](packages/uri-registry/) | `InternalUrlRouter` | 协议注册器：任何插件可注册 `scheme://` handler，统一经 `read_uri` 工具访问 | ✅ 已实现并实测 |
 | [`@omp2dsh/dsh-docs`](packages/dsh-docs/) | `OmpProtocolHandler` + `docs-index` | DSH 内置文档：注册 `dsh://` handler，语料（官方 docs 215 篇）独立可更新 | ✅ 已实现并实测 |
-| [`@omp2dsh/bang`](packages/bang/) | bang/bash 输入模式 | `!` 前缀快速运行命令：`!cmd` 结果注入会话流（进上下文），`!!cmd` 仅面板显示并标注排除上下文 | ✅ 动态原型已实测，包已收编 |
+| [`@omp2dsh/bang`](packages/bang/) | bang/bash 输入模式 | `/b` 快速运行命令（结果卡片 + 进上下文不唤醒）、`/bb`（仅卡片排除上下文），卡片默认展开 | ✅ 已实测，包已收编 |
 
 ### 架构（为什么拆两个包）
 
@@ -52,3 +52,4 @@ dsh plugin --profile web add github:<you>/omp2dsh-plugins
 4. **可逆**：所有副作用可卸载（disposer / effect）；stop/undefine 即清理。
 
 完整规则、开发流程、验收门槛见 [AGENTS.md](AGENTS.md)。
+插件开发经验与踩坑记录见 [docs/plugin-development-experience.md](docs/plugin-development-experience.md)。
