@@ -1,0 +1,8 @@
+# @omp2dsh/uri-registry profile bundle patch: inserts the plugin row into any
+# profile that lists @omp2dsh/uri-registry in its `dsh.profile.bundles`.
+# The row loads the plugin by package name from the profile's node_modules.
+# See packages/README.md and AGENTS.md for the two-plane rule this follows.
+
+- insert:
+    - id: uri-registry
+      name: '@omp2dsh/uri-registry'

@@ -1,0 +1,44 @@
+{
+  "name": "@omp2dsh/dsh-docs",
+  "version": "0.1.0",
+  "description": "DSH built-in docs: registers the dsh:// scheme on uri-registry, serving the official deepseek-harness docs corpus. Ported from omp's OmpProtocolHandler + docs-index.",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "corpus",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b --pretty false",
+    "typecheck": "tsc -b --pretty false",
+    "test": "node --test lib/*.test.js"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@omp2dsh/uri-registry": "workspace:^"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@types/node": "^22.20.0",
+    "typescript": "^6.0.3"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

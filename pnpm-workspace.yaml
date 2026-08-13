@@ -1,0 +1,4 @@
+packages:
+  - packages/*
+
+storeDir: /Users/fun10165/Documents/test-dsh/omp2dsh-plugins/.pnpm-store

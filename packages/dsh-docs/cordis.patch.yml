@@ -1,0 +1,9 @@
+# @omp2dsh/dsh-docs profile bundle patch: inserts the plugin row into any
+# profile that lists @omp2dsh/dsh-docs in its `dsh.profile.bundles`.
+# The row loads the plugin by package name from the profile's node_modules.
+# Depends on the uri-registry plugin being mounted in the same profile —
+# the row below lets cordis resolve the service dependency at runtime.
+
+- insert:
+    - id: dsh-docs
+      name: '@omp2dsh/dsh-docs'

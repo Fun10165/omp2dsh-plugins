@@ -1,0 +1,20 @@
+{
+  "name": "omp2dsh-plugins",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Plugins ported from omp (oh-my-pi) to DeepSeek Harness — small, decoupled, KISS.",
+  "packageManager": "pnpm@10.30.3",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "sync-corpus": "bash scripts/sync-corpus.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "^6.0.3"
+  }
+}
