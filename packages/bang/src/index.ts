@@ -2,25 +2,31 @@
  * bang — quick command runner ported from omp's bang input modes.
  *
  * Architecture (all official DSH mechanisms):
- *  1. Registers TWO independent commands: `/b <cmd>` and `/bb <cmd>`.
+ *  1. Registers THREE independent commands: `/b <cmd>`, `/bb <cmd>`, `/bq`.
  *     (Port of omp's `!` vs `!!`: two distinct prefixes, not an argument
  *     marker — `/bang !!ls` was rejected as an ill-formed hybrid.)
- *  2. Both execute through the DSH shell service with the session's cwd and
+ *  2. Execution goes through the DSH shell service with the session's cwd and
  *     resolved sandbox policy (the bash tool's exact path). GUI launchers
  *     (`zed .`, `code .`) are NOT blocked by the file sandbox — the sandbox
  *     constrains file writes, not command execution.
- *  3. `/b` (in-context): the result renders as a persistent command card AND
- *     is appended to the session flow as a plugin user message via
- *     `session.append('user/message', …, { surfaceOp: 'append' })` — visible
- *     in the Web UI, durable, and model-visible in later turns, WITHOUT
- *     waking the driver: no model turn is triggered.
- *  4. `/bb` (excluded): card-only, labeled "Excluded from context".
+ *  3. `/b` (in-context, background): the handler returns immediately so the
+ *     composer claim releases; the shell runs off the event loop and its
+ *     result is appended to the session flow as a plugin user message via
+ *     `session.append('user/message', …, { surfaceOp: 'append' })` — visible,
+ *     durable, model-visible in later turns, WITHOUT waking the driver.
+ *  4. `/bb` (excluded, synchronous): card-only result labeled
+ *     "Excluded from context"; cancelled via the card's ⏹ button (ctx.remote
+ *     dispatches /bq — independent of the held composer claim).
+ *  5. `/bq`: aborts through a plugin-owned AbortController registry — the
+ *     ONLY reliable cancel path (the official UI never forwards a signal).
  *
- * Design rules (repo AGENTS.md): KISS — no runtime deps beyond the DSH
- * runtime, no client code (slash commands trigger natively).
+ * This file is the assembly layer only: types, text, notes, and execution
+ * live in sibling files (AGENTS.md: one responsibility per file).
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { CommandRegistryLike, RunningBang, SandboxPolicyLike, ShellLike } from './types.js'
+import { executeBangCommand, startBangBackground, cancelRunning } from './execution.js'
 
 /** Cordis function-plugin name — must match the cordis.patch.yml row id. */
 export const name = 'bang'
@@ -28,187 +34,10 @@ export const name = 'bang'
 /** Services this plugin hard-depends on. */
 export const inject = ['commands', 'shell', 'sandboxPolicy']
 
-/** Minimal faces of the injected services (subset of the DSH contracts). */
-export interface ShellLike {
-  resolve(request: Record<string, unknown>): { command: string; workdir?: string; timeoutMs?: number }
-  run(spec: { command: string; workdir?: string; timeoutMs?: number; signal?: AbortSignal }): Promise<{
-    exitCode: number
-    stdout: { text: string } | string
-    stderr: { text: string } | string
-    timedOut?: boolean
-  }>
-}
-export interface SandboxPolicyLike {
-  resolve(request?: { session?: unknown }): unknown
-}
-export interface CommandRegistryLike {
-  register(definition: {
-    name: string
-    description: string
-    input?: { hint: string }
-    handler(invocation: { agent: AgentLike; rawInput: string; signal?: AbortSignal }): unknown
-  }): () => void
-}
-export interface AgentLike {
-  session?: {
-    header?: { cwd?: string }
-    append(type: 'user/message', data: unknown, intent: { surfaceOp: 'append' }): unknown
-  }
-}
-
-/** One command-card outcome (the official CommandResult shape). */
-export type BangCardResult =
-  | { kind: 'success'; text: string }
-  | { kind: 'error'; text: string }
-
-/** Build the card text: plain ASCII, no emoji. */
-export function renderCardText(command: string, exitCode: number, output: string, exclude: boolean): string {
-  const body = output || '(no output)'
-  return (
-    '[exit ' + exitCode + '] ' + command + '\n\n' + body +
-    (exclude ? '\n\nExcluded from context: visible on this card only.' : '')
-  )
-}
-
-/** The /bq line that cancels a running card: the card args ARE the exact
- * command text the running registry is keyed by (name is /b or /bb, args is
- * the shell command). Lives on the node side so it stays unit-testable. */
-export function cancelLine(node: { name: string | null; args: string | null }): string {
-  const args = (node.args || '').trim()
-  return args ? '/bq ' + args : '/bq'
-}
-
-/** The injected message text: explicit provenance plus the exit code so the model knows whether the command succeeded. */
-export function noteText(command: string, output: string, exitCode: number): string {
-  return (
-    '> /b ' + command + ' [exit ' + exitCode + ']' +
-    '：用户执行指令的输出（由 bang 插件自动注入，非用户直接输入；仅作上下文参考，除非用户要求否则无需回应）' +
-    '\n\n```\n' + output + '\n```'
-  )
-}
-
-/** Append the result to the session flow (in-context, no wake). */
-export function noteToSession(agent: AgentLike, command: string, output: string, exitCode: number): boolean {
-  if (agent.session === undefined || typeof agent.session.append !== 'function') return false
-  try {
-    agent.session.append(
-      'user/message',
-      {
-        id: 'bang-' + Date.now() + '-' + Math.floor(Math.random() * 1e9),
-        role: 'user',
-        content: [{ type: 'text', text: noteText(command, output, exitCode) }],
-        source: { kind: 'plugin', plugin: 'bang' },
-      },
-      { surfaceOp: 'append' },
-    )
-    return true
-  } catch {
-    return false
-  }
-}
-
-/** One running bang execution keyed by its command text. */
-export interface RunningBang {
-  /** Abort controller owned by this plugin — the ONLY reliable cancel path today
-   * (the official UI never forwards a signal: ui-commands executes without one
-   * and the gateway falls back to NEVER_ABORTED_SIGNAL). */
-  controller: AbortController
-  startedAt: number
-}
-
-/** Start a bang command in the background: the handler returns immediately so the
- * composer claim releases and the user can type /bq or keep chatting; the shell
- * runs off the event loop and its result is injected into the session flow
- * (with provenance marker + exit code) when it settles. */
-export function startBangBackground(deps: {
-  shell: ShellLike
-  sandboxPolicy: SandboxPolicyLike
-  timeoutMs?: number
-}, agent: AgentLike, command: string, running: Map<string, RunningBang>): { immediate: BangCardResult; done: Promise<void> } {
-  const { shell, sandboxPolicy, timeoutMs = 60_000 } = deps
-  const trimmed = String(command ?? '').trim()
-  if (!trimmed) {
-    return { immediate: { kind: 'error', text: 'empty command: use /b <command>' }, done: Promise.resolve() }
-  }
-  const controller = new AbortController()
-  running.set(trimmed, { controller, startedAt: Date.now() })
-  const done = (async () => {
-    const cwd = agent.session?.header?.cwd
-    const policy = sandboxPolicy.resolve({ session: agent.session })
-    try {
-      const spec = shell.resolve({
-        command: trimmed,
-        ...(cwd !== undefined ? { workdir: cwd } : {}),
-        sandboxPolicy: policy,
-        timeoutMs,
-        signal: controller.signal,
-      })
-      const result = await shell.run(spec)
-      const textOf = (part: { text: string } | string): string =>
-        typeof part === 'string' ? part : (part?.text ?? '')
-      const output = [textOf(result.stdout), textOf(result.stderr)].filter(Boolean).join('\n')
-      const exitCode = typeof result.exitCode === 'number' ? result.exitCode : -1
-      noteToSession(agent, trimmed, output || '(no output)', exitCode)
-    } catch (error) {
-      noteToSession(agent, trimmed, 'error: ' + (error instanceof Error ? error.message : String(error)), -1)
-    } finally {
-      running.delete(trimmed)
-    }
-  })()
-  return {
-    immediate: { kind: 'success', text: 'started: ' + trimmed + ' — result will be injected into context when finished (/bq to cancel)' },
-    done,
-  }
-}
-
-/** Execute one command and build its card result; `include` decides whether the result also enters the session flow. */
-export async function executeBangCommand(deps: {
-  shell: ShellLike
-  sandboxPolicy: SandboxPolicyLike
-  timeoutMs?: number
-}, agent: AgentLike, command: string, include: boolean, signal?: AbortSignal, running?: Map<string, RunningBang>): Promise<BangCardResult> {
-  const { shell, sandboxPolicy, timeoutMs = 60_000 } = deps
-  const trimmed = String(command ?? '').trim()
-  if (!trimmed) {
-    return { kind: 'error', text: 'empty command: use /b <command> or /bb <command>' }
-  }
-  if (signal?.aborted === true) {
-    return { kind: 'error', text: 'cancelled before execution' }
-  }
-  const cwd = agent.session?.header?.cwd
-  const policy = sandboxPolicy.resolve({ session: agent.session })
-  // Self-owned cancellation: the official command pipeline never aborts its
-  // signal from the Web UI (ui-commands executes without one, gateway falls
-  // back to NEVER_ABORTED_SIGNAL), so /bq must be able to abort this run.
-  // The invocation signal (whenever the UI does forward one) is bridged onto
-  // the same controller — either abort path stops the shell.
-  const controller = new AbortController()
-  running?.set(trimmed, { controller, startedAt: Date.now() })
-  const bridge = signal !== undefined && !signal.aborted ? () => controller.abort() : undefined
-  if (signal !== undefined && signal.aborted) controller.abort()
-  if (bridge !== undefined) signal!.addEventListener('abort', bridge, { once: true })
-  try {
-    const spec = shell.resolve({
-      command: trimmed,
-      ...(cwd !== undefined ? { workdir: cwd } : {}),
-      sandboxPolicy: policy,
-      timeoutMs,
-      signal: controller.signal,
-    })
-    const result = await shell.run(spec)
-    const textOf = (part: { text: string } | string): string =>
-      typeof part === 'string' ? part : (part?.text ?? '')
-    const output = [textOf(result.stdout), textOf(result.stderr)].filter(Boolean).join('\n')
-    const exitCode = typeof result.exitCode === 'number' ? result.exitCode : -1
-    if (include) noteToSession(agent, trimmed, output || '(no output)', exitCode)
-    return { kind: exitCode === 0 ? 'success' : 'error', text: renderCardText(trimmed, exitCode, output, !include) }
-  } catch (error) {
-    return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
-  } finally {
-    running?.delete(trimmed)
-    if (bridge !== undefined) signal!.removeEventListener('abort', bridge)
-  }
-}
+export type * from './types.js'
+export { renderCardText, noteText, cancelLine } from './text.js'
+export { noteToSession } from './notes.js'
+export { startBangBackground, executeBangCommand, cancelRunning } from './execution.js'
 
 export function apply(ctx: Context): void {
   const commands = ctx.get('commands') as CommandRegistryLike | undefined
@@ -240,22 +69,6 @@ export function apply(ctx: Context): void {
     name: 'bq',
     description: 'Cancel a running bang command: /bq <command> cancels by exact text, bare /bq cancels the most recent run',
     input: { hint: '[<command>]' },
-    handler: ({ rawInput }) => {
-      const target = String(rawInput || '').trim()
-      if (target !== '') {
-        const entry = running.get(target)
-        if (entry === undefined) return { kind: 'error', text: 'no running bang command: ' + target }
-        entry.controller.abort()
-        return { kind: 'success', text: 'cancelled: ' + target }
-      }
-      // Most recent run (Map preserves insertion order; delete clears on settle).
-      let latest: { command: string; entry: RunningBang } | undefined
-      for (const [command, entry] of running) {
-        if (latest === undefined || entry.startedAt > latest.entry.startedAt) latest = { command, entry }
-      }
-      if (latest === undefined) return { kind: 'error', text: 'no running bang command' }
-      latest.entry.controller.abort()
-      return { kind: 'success', text: 'cancelled: ' + latest.command }
-    },
+    handler: ({ rawInput }) => cancelRunning(running, rawInput),
   })
 }
