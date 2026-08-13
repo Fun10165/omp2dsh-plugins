@@ -19,6 +19,7 @@ import assert from 'node:assert/strict'
 import {
   renderCardText,
   executeBangCommand,
+  startBangBackground,
   noteToSession,
   noteText,
   type ShellLike,
@@ -198,5 +199,48 @@ describe('bang /bq cancellation (self-owned, UI never forwards a signal)', () =>
     entry.controller.abort()
     assert.equal(receivedSignal?.aborted, true) // the spec carried the abortable signal
     await pending
+  })
+})
+
+describe('bang /b background execution (composer claim must release immediately)', () => {
+  it('returns immediately while the shell still runs (fails pre-fix: handler awaited the shell)', async () => {
+    const running = new Map<string, import('./index.js').RunningBang>()
+    let releaseRun: () => void = () => {}
+    const runGate = new Promise<void>((resolve) => { releaseRun = resolve })
+    const shell: ShellLike = {
+      resolve(request: Record<string, unknown>) {
+        return { command: String(request.command), timeoutMs: 60000, signal: request.signal as AbortSignal }
+      },
+      async run() {
+        await runGate
+        return { exitCode: 0, stdout: { text: 'ok' }, stderr: { text: '' } }
+      },
+    }
+    const started = startBangBackground({ shell, sandboxPolicy: makePolicy() }, makeAgent(), 'sleep 30', running)
+    // immediate result is available before the shell settles
+    assert.match(started.immediate.text, /^started: sleep 30/)
+    assert.equal(running.has('sleep 30'), true)
+    releaseRun()
+    await started.done
+    assert.equal(running.has('sleep 30'), false)
+  })
+
+  it('injects the background result into the session flow when it settles', async () => {
+    const running = new Map<string, import('./index.js').RunningBang>()
+    const agent = makeAgent()
+    const shell: ShellLike = {
+      resolve(request: Record<string, unknown>) {
+        return { command: String(request.command), timeoutMs: 60000, signal: request.signal as AbortSignal }
+      },
+      async run() {
+        return { exitCode: 7, stdout: { text: '' }, stderr: { text: 'boom' } }
+      },
+    }
+    const started = startBangBackground({ shell, sandboxPolicy: makePolicy() }, agent, 'failing-cmd', running)
+    await started.done
+    assert.equal(agent.appended.length, 1)
+    const message = agent.appended[0] as { content: Array<{ type: string; text: string }> }
+    assert.match(message.content[0]!.text, /\[exit 7\]/)
+    assert.match(message.content[0]!.text, /boom/)
   })
 })
